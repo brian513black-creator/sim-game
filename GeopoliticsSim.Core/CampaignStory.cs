@@ -55,11 +55,11 @@ public sealed partial class Campaign
         var chapter = Chapter;
         string scene = OpeningScene(chapter);
         _chapterScenes[chapter.Start] = scene;
-        AddStory(chapter.Title, scene);
+        AddStory(chapter.Title, scene, speaker: chapter.Speaker);
     }
 
-    private void AddStory(string title, string scene, bool requiresElectionCall = false, bool decision = false) =>
-        _briefings.Add(new Briefing(Date, scene, decision, title, requiresElectionCall));
+    private void AddStory(string title, string scene, bool requiresElectionCall = false, bool decision = false, string? speaker = null) =>
+        _briefings.Add(new Briefing(Date, scene, decision, title, requiresElectionCall, speaker));
 
     private void RecordOpeningBillOutcome(OpeningBillOutcome outcome)
     {
@@ -114,14 +114,21 @@ public sealed partial class Campaign
     {
         var unfinished = new List<string>();
         if (OnDesk) unfinished.Add($"the unsigned {PackageName}");
-        if (_ruleDate > Day) unfinished.Add("the agency review still underway");
+        if (PendingCourtReview is { } courtReview)
+            unfinished.Add($"the federal court’s review of the emergency order due {courtReview:MMMM d}");
+        else if (EmergencyOrderExpiry is { } expiry)
+            unfinished.Add($"the emergency order expiring {expiry:MMMM d}");
+        if (PendingAgencyReview is { } agencyReview)
+            unfinished.Add($"the agency review scheduled to conclude {agencyReview:MMMM d}");
         if (_conversation != null || _conversationReply != null) unfinished.Add("the workers’ correspondence awaiting a reply");
         if (PendingAgendaFollowUp != null)
             unfinished.Add($"the follow-up to {_responseEpisode}");
-        if (Mission != DefenseMission.None || Authorization == DefenseAuthorization.Pending)
+        if (Mission != DefenseMission.None || Authorization == DefenseAuthorization.Pending || OtherPendingAuthorization != null)
             unfinished.Add("the Pentagon’s open commitment or authorization request");
         if (PendingForeignReply != null)
             unfinished.Add("the diplomatic reply State is still waiting for");
+        if (PendingTradePartner is { } tradePartner)
+            unfinished.Add($"the trade reply from {tradePartner}");
         if (unfinished.Count > 0)
         {
             string owner = CanBeginSecondTerm ? "your second-term staff" : "the transition team";

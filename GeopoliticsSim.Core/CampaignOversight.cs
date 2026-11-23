@@ -160,7 +160,7 @@ public sealed partial class Campaign
     private void VoteOnRemoval()
     {
         int votes = Math.Clamp((int)Math.Round(36 + _evidence * 27
-            + (50 - Approval) * .65 + _oversightRandom.Next(-7, 8)), 0, 100);
+            + (50 - Approval) * .65 + _oversightRandom.Next(-7, 8) + TrialRecordEffect), 0, 100);
         LastSenateOversightVote = new OversightVote(votes, 100, 67);
         Oversight = votes >= 67 ? OversightStage.Removed : OversightStage.Closed;
         AddBrief(Removed

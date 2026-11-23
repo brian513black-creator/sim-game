@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <EnableDynamicLoading>true</EnableDynamicLoading>
-    <DefaultItemExcludes>$(DefaultItemExcludes);GeopoliticsSim.Core/**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);GeopoliticsSim.Core/**;tests/**</DefaultItemExcludes>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>

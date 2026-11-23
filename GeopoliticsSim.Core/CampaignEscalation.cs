@@ -17,6 +17,7 @@ public sealed partial class Campaign
     private int _lastSummitDay = -100;
     private int _nextWartimeReview;
     private bool _civilianReliefFunded;
+    private DateTime? _firstWorldWarBegan;
 
     public static IReadOnlyList<string> GreatPowers { get; } = Array.AsReadOnly(Powers);
     public bool WorldWarActive { get; private set; }
@@ -136,7 +137,8 @@ public sealed partial class Campaign
         if (_rungs.Values.Contains(10) && _rungs.Values.Count(rung => rung >= 7) >= 2)
         {
             WorldWarActive = true;
-            WorldWarBegan ??= Date;
+            _firstWorldWarBegan ??= Date;
+            WorldWarBegan = Date;
             _nextWartimeReview = Day + 28;
             _civilianReliefFunded = false;
             OpenDefenseWindow("Global wartime response");
@@ -166,6 +168,7 @@ public sealed partial class Campaign
     private void ResolveCeasefireSummit()
     {
         double chance = .86 - _rungs.Values.Count(rung => rung >= 7) * .20;
+        if (WartimeAddressEffect != 0) chance = Math.Clamp(chance + WartimeAddressEffect, .05, .95);
         if (_diplomacyRandom.NextDouble() < chance)
         {
             WorldWarActive = false;
@@ -174,6 +177,7 @@ public sealed partial class Campaign
                 if (_rungs.ContainsKey(country)) _rungs[country] = Math.Min(4, _rungs[country]);
             _pressure = Math.Max(.1, _pressure - .75);
             AddBrief("The delegations accepted a ceasefire framework. The global war has paused, and agencies have begun assessing the cost of recovery.", true);
+            if (ScopedWartimeStory) CloseWartimeAddress();
             AddStory("The first quiet morning", "Maya brings the first recovery report. Elena asks about the people who stopped calling back during the war. Nora writes down the names before anyone starts talking about a peace dividend.");
         }
         else

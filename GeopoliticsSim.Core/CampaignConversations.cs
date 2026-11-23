@@ -1,6 +1,6 @@
 namespace GeopoliticsSim.Core;
 
-public enum ConversationId { MissingName, Hearing, EmptyChair, Endorsement }
+public enum ConversationId { MissingName, Hearing, EmptyChair, Endorsement, Ledger, Debate, FirstTransition, LastSignature, TrialRecord, WartimeAddress }
 
 public record ConversationOption(string Label, string Stakes, int CapitalChange, double ApprovalChange, string FollowUp);
 
@@ -43,7 +43,8 @@ public sealed partial class Campaign
         _conversationReplyTitle = conversation.Title;
         _conversationReplyDay = Day + 12;
         _conversation = null;
-        AddStory($"{conversation.Title} · Your decision", $"You chose to {option.Label.ToLowerInvariant()}. The White House will follow up on {Inauguration.AddDays(_conversationReplyDay):MMMM d}.");
+        string decision = char.ToLowerInvariant(option.Label[0]) + option.Label[1..];
+        AddStory($"{conversation.Title} · Your decision", $"You chose to {decision}. The White House will follow up on {Inauguration.AddDays(_conversationReplyDay):MMMM d}.");
         return true;
     }
 
@@ -65,6 +66,12 @@ public sealed partial class Campaign
                 ConversationId.MissingName => "Elena calls the district office instead. Jules takes time off to go in person and brings both employee numbers. Nora leaves the unopened list in the briefing folder.",
                 ConversationId.Hearing => "Mercer releases his next committee calendar. The workers’ case has no hearing date. Elena asks the district aide to keep calling about the appeals.",
                 ConversationId.EmptyChair => "Reed takes a copy of the unresolved cases. When new calls come in, the offices continue deciding one at a time who will answer them.",
+                ConversationId.Ledger => "Okafor files both ledgers with a note explaining why she could not verify the count. The next time staff quote the figure, she asks them to read the note first.",
+                ConversationId.Debate => "The moderator moves to the next topic. Jules switches off the television when the question goes unanswered. The district office still has their number.",
+                ConversationId.FirstTransition => "Nora puts the unanswered correspondence in the handover box. The agency that opens it in January will have to assign its own dates.",
+                ConversationId.LastSignature => "Jules’s letter stays in the box on the Resolute Desk. The transition team collects it with the rest of the open case files.",
+                ConversationId.TrialRecord => "Counsel submits the record already before the Senate. Reed asks for a copy before the vote so both offices have the same papers.",
+                ConversationId.WartimeAddress => "State releases the day’s bulletin. Elena asks the local station to read the number for the civilian assistance desk. Nora has a new list of calls by morning.",
                 _ => "Reed makes the announcement alone. The campaign prints its own summary of the record. Nora leaves a copy on your desk with the disputed cases clipped inside."
             };
             AddStory($"{conversation.Title} · No reply", silence);
@@ -74,14 +81,16 @@ public sealed partial class Campaign
         else if (Date == HearingDate) OpenHearing();
         else if (Term == 2 && Date == EmptyChairDate) OpenEmptyChair();
         else if (Term == 2 && Date == EndorsementDate) OpenEndorsement();
+        else TickExtendedStory();
     }
 
     private void OpenConversation(ConversationId id, string title, string speaker, string scene,
         params ConversationOption[] options)
     {
         _conversationSeen = true;
-        _conversation = new PresidentialConversation(id, title, speaker, scene, Date.AddDays(21), Array.AsReadOnly(options));
-        AddStory(title, scene);
+        var deadline = id == ConversationId.TrialRecord ? Inauguration.AddDays(_reviewDay) : Date.AddDays(21);
+        _conversation = new PresidentialConversation(id, title, speaker, scene, deadline, Array.AsReadOnly(options));
+        AddStory(title, scene, speaker: speaker);
     }
 
     private void OpenMissingName()
@@ -107,6 +116,13 @@ public sealed partial class Campaign
             1 => "Mercer has the transcript of Jules’s testimony. Staff have flagged the questions two agencies answered differently.",
             2 => "Elena comes in with photocopies. She kept the announcement that put the company at the microphone and the letters it left out.",
             _ => "A district aide brings Elena in after the public session. She has the schedule and a stack of requests her crew sent to different offices."
+        };
+        evidence += Choice(ConversationId.Ledger) switch
+        {
+            0 => " Okafor’s audit ties several of the calls to the same reporting error.",
+            1 => " The committee has asked to see the corrections Maya sent to the agencies.",
+            2 => " Mercer has both ledgers. He asks which count he is supposed to defend on the floor.",
+            _ => ""
         };
         OpenConversation(ConversationId.Hearing, "Mercer’s Condition", "Senator Ellis Mercer",
             evidence + " Mercer can hold a hearing if you are willing to bring the agencies in. A narrower deal can get help to the plant sooner. He asks whether you want a public commitment the next Congress can hold you to.",
@@ -160,7 +176,7 @@ public sealed partial class Campaign
 
     private double ConversationReputation(State state)
     {
-        double effect = 0;
+        double effect = Term == 1 ? DebateReputation(state) : 0;
         if (state.Code == "MI")
         {
             effect += Choice(ConversationId.MissingName) switch { 0 => .45, 1 => .9, 2 => -1.5, _ => 0 };
@@ -194,7 +210,7 @@ public sealed partial class Campaign
                 1 => "\n\nA copy of the joint pledge is folded inside. Beside the first review date, Elena has written who must be in the room.",
                 2 => "\n\nThe joint statement is in the folder, too. Elena underlines a sentence about accountability and writes a phone number in the margin.",
                 _ => ""
-            });
+            }) + LastHandoverCoda();
         }
     }
 }

@@ -54,7 +54,7 @@ public sealed partial class Campaign
 
     public string? OppositionBrief => _oppositionLastTrip;
 
-    public string? TradeReadout => !VariableWorld ? null : TradePostureFor(Current.Ally) switch
+    public string? TradeReadout => !VariableWorld ? null : TradePostureFor(PendingTradePartner ?? Current.Ally) switch
     {
         TradePosture.ExportFirst => "Embassy readout. Exporters have the trade ministry’s ear and want access to U.S. buyers.",
         TradePosture.ProtectSupply => "Embassy readout. The ministry is under pressure to reserve supplies for buyers at home.",
@@ -63,6 +63,13 @@ public sealed partial class Campaign
 
     private TradePosture TradePostureFor(string partner) =>
         _partnerPostures.GetValueOrDefault(partner, TradePosture.SeekTerms);
+
+    public bool EnableLockedTradeTerms()
+    {
+        if (LockedTradeTerms) return false;
+        LockedTradeTerms = true;
+        return true;
+    }
 
     private void ResolveTradeTalks()
     {
@@ -74,8 +81,9 @@ public sealed partial class Campaign
             _ => .64
         };
         int history = _tradeHistory.GetValueOrDefault(_tradePartner);
+        bool includesDomesticSourcing = _tradeUsesLockedTerms ? _tradeIncludesDomesticSourcing : HasMeasure(Measure.DomesticSourcing);
         chance = Math.Clamp(chance + history * .05 + Math.Max(0, _pressure - 1) * .045
-            - (HasMeasure(Measure.DomesticSourcing) ? .16 : 0), .20, .94);
+            - (includesDomesticSourcing ? .16 : 0), .20, .94);
         double roll = _worldRandom!.NextDouble();
         if (roll < chance * .67)
         {

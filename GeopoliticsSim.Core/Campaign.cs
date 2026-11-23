@@ -9,7 +9,7 @@ public record StateResult(State State, double ApprovalEffect, double EconomyEffe
 {
     public double Margin => State.Lean + ApprovalEffect + EconomyEffect + CampaignEffect + ElectionVariation + OppositionEffect + LocalClimate + PolicyReputation;
 }
-public record Briefing(DateTime Date, string Text, bool Decision, string? SceneTitle = null, bool RequiresElectionCall = false)
+public record Briefing(DateTime Date, string Text, bool Decision, string? SceneTitle = null, bool RequiresElectionCall = false, string? Speaker = null)
 {
     public bool Story => SceneTitle != null;
 }
@@ -23,6 +23,7 @@ public sealed partial class Campaign
     private readonly HashSet<Measure> _measures = [Measure.WorkerRelief, Measure.ProductionCredits];
     private readonly HashSet<string> _visited = [];
     private readonly Dictionary<string, double> _deals = [];
+    private (IReadOnlyList<Vote> House, IReadOnlyList<Vote> Senate)? _floorRollCall;
     private int _crisisIndex;
     private int _secondTermCrisis;
     private int _nextCrisis = 64;
@@ -31,16 +32,21 @@ public sealed partial class Campaign
     private int _ruleDate;
     private int _dealDate;
     private string _tradePartner = "";
+    private bool _tradeUsesLockedTerms;
+    private bool _tradeIncludesDomesticSourcing;
     private bool _tradeRequested;
     private bool _orderIssued;
     private bool _ruleRequested;
     private bool _billResolved;
-    private bool _underReview;
     private bool _cabinetExpert;
     private bool _cabinetChosen;
     private double _pressure = 2.1;
     private double _fiscalImpulse;
     private double _economicRecord;
+
+    public const int RallyCost = 5;
+    public const double RallyMarginBonus = 3.4;
+    public const double ElectionDaySwing = 1.7;
 
     public static readonly DateTime Inauguration = new(2029, 1, 20);
     public static readonly DateTime ElectionDay = new(2032, 11, 2);
@@ -95,17 +101,24 @@ public sealed partial class Campaign
     public bool CanOrder => Allows(AgencyTools.Order) && !_orderIssued && _orderExpires <= Day && !Finished;
     public bool CanRule => Allows(AgencyTools.Rule) && !_ruleRequested && _ruleDate <= Day && !Finished;
     public bool CanAppoint => !_cabinetChosen && !Finished;
-    public string OrderStatus => _orderExpires > Day ? (_underReview ? "Active · under review" : "Active") : "Inactive";
+    public DateTime? EmergencyOrderExpiry => _orderExpires > Day ? Inauguration.AddDays(_orderExpires) : null;
+    public DateTime? PendingCourtReview => _courtDate > Day ? Inauguration.AddDays(_courtDate) : null;
+    public DateTime? PendingAgencyReview => _ruleDate > Day ? Inauguration.AddDays(_ruleDate) : null;
+    public string OrderStatus => _orderExpires > Day ? (_courtDate > Day ? "Active · under review" : "Active") : "Inactive";
     public string BillStatus => OnDesk ? (Finished ? "Bill left unsigned at the handover" : "Awaiting your signature")
         : !HasFloorVote ? "No floor vote scheduled"
         : _billResolved ? "Floor vote concluded" : $"Floor vote in {FloorDay - Day} days";
-    public string Intelligence => _dealDate > Day ? $"Response from {_tradePartner} expected in {_dealDate - Day} days."
+    public string? PendingTradePartner => _dealDate > Day ? _tradePartner : null;
+    public bool LockedTradeTerms { get; private set; }
+    public string Intelligence => PendingTradePartner is { } partner ? $"Response from {partner} expected in {_dealDate - Day} days."
         : $"Estimated recovery window: {Math.Max(5, Escalation * 5 - 6)}–{Escalation * 5 + 12} days. Moderate confidence.";
     public double EstimatedMargin(State state) => ElectionResult(state, 0).Margin;
 
+    public ElectionOutlook ForecastFor(State state) => new(ElectionResult(state, 0), HasVisited(state.Code));
+
     private StateResult ElectionResult(State state, double variation) =>
         new(state, (Approval - 49) * .85, _economicRecord * state.Exposure * .46,
-            HasVisited(state.Code) ? 3.4 : 0, variation, OppositionEffect(state), LocalClimate(state), AgendaReputation(state) + ConversationReputation(state));
+            HasVisited(state.Code) ? RallyMarginBonus : 0, variation, OppositionEffect(state), LocalClimate(state), AgendaReputation(state) + ConversationReputation(state));
     public bool HasVisited(string code) => _visited.Contains(code);
     public string OpeningRecord => CommitmentOutcome switch
     {
@@ -123,13 +136,17 @@ public sealed partial class Campaign
 
     public int Leverage(string code) => _deals.ContainsKey(code) ? 1 : 0;
 
-    public Campaign(int seed = 2029, bool oversightEnabled = true, int? oversightSeed = null, bool agendaEnabled = true, bool variableWorld = false, bool conversationsEnabled = true)
+    public Campaign(int seed = 2029, bool oversightEnabled = true, int? oversightSeed = null, bool agendaEnabled = true, bool variableWorld = false, bool conversationsEnabled = true, bool extendedStoryEnabled = true, bool scopedDefenseAuthorization = true, bool lockedTradeTerms = true, bool scopedWartimeStory = true)
     {
         _random = new Random(seed);
         InitializeEscalation(seed);
         if (agendaEnabled) _agendaStartIndex = 0;
         if (variableWorld) InitializeWorld(seed);
         ConversationsEnabled = conversationsEnabled;
+        ExtendedStoryEnabled = extendedStoryEnabled;
+        ScopedDefenseAuthorization = scopedDefenseAuthorization;
+        LockedTradeTerms = lockedTradeTerms;
+        ScopedWartimeStory = scopedWartimeStory;
         if (oversightEnabled) EnableOversight(oversightSeed ?? seed);
         foreach (var state in States.Where(state => state.HouseSeats > 0))
         {
@@ -168,6 +185,11 @@ public sealed partial class Campaign
                 return new Vote(seat, margin >= 0, Math.Abs(margin) < .10);
             }).ToArray();
     }
+
+    public IReadOnlyList<Vote>? FloorRollCall(bool senate) => senate ? _floorRollCall?.Senate : _floorRollCall?.House;
+
+    private IReadOnlyList<Vote> CaptureRollCall(bool senate) =>
+        Array.AsReadOnly(WhipCount(senate).Select(vote => vote with { Swing = false }).ToArray());
 
     public bool MakeOpeningCommitment(OpeningCommitment commitment)
     {
@@ -239,7 +261,7 @@ public sealed partial class Campaign
 
     public bool Rally(string state)
     {
-        if (Date >= CurrentElectionDay || !States.Any(entry => entry.Code == state) || _visited.Contains(state) || !Spend(5)) return false;
+        if (Date >= CurrentElectionDay || !States.Any(entry => entry.Code == state) || _visited.Contains(state) || !Spend(RallyCost)) return false;
         _visited.Add(state);
         AddBrief(Term == 1 ? $"Your visit to {state} made the evening news. Local support ticked upward."
             : $"Your visit to {state} boosted local support for your party’s nominee.");
@@ -262,8 +284,10 @@ public sealed partial class Campaign
         if (!CanTrade || !Spend(8)) return false;
         _tradeRequested = true;
         _tradePartner = Current.Ally;
+        _tradeUsesLockedTerms = LockedTradeTerms;
+        _tradeIncludesDomesticSourcing = HasMeasure(Measure.DomesticSourcing);
         _dealDate = Day + _random.Next(5, 13);
-        AddBrief($"State opened temporary trade relief talks with {Current.Ally}.");
+        AddBrief($"State opened temporary trade relief talks with {_tradePartner}.");
         return true;
     }
 
@@ -273,7 +297,6 @@ public sealed partial class Campaign
         _orderIssued = true;
         _orderExpires = Day + 38;
         _courtDate = Day + _random.Next(3, 10);
-        _underReview = true;
         Approval = Math.Min(100, Approval + 1);
         AddBrief("Emergency relief began immediately. The Attorney General expects a legal challenge.");
         return true;
@@ -290,7 +313,7 @@ public sealed partial class Campaign
 
     public bool ResolveBill(bool sign)
     {
-        if (Removed || !OnDesk || (!sign && !Spend(5))) return false;
+        if (Finished || !OnDesk || (!sign && !Spend(5))) return false;
         OnDesk = false;
         if (sign)
         {
@@ -350,6 +373,7 @@ public sealed partial class Campaign
                 _billResolved = !HasFloorVote;
                 Reconciliation = false;
                 LastFloorVote = null;
+                _floorRollCall = null;
                 FloorDay = HasFloorVote ? Day + ActivePlan.FloorLeadDays : -1;
                 _deals.Clear();
                 if (Episode?.Bill != null)
@@ -371,7 +395,6 @@ public sealed partial class Campaign
         }
         if (Day == _courtDate)
         {
-            _underReview = false;
             if (_random.NextDouble() < .45)
             {
                 _orderExpires = 0;
@@ -380,6 +403,8 @@ public sealed partial class Campaign
             }
             else AddBrief("A federal court declined to stay the relief order. The policy remains active.", true);
         }
+        if (Day == _orderExpires)
+            AddBrief("The emergency relief order expired. Its economic effect ends today.");
         if (Day == _dealDate && VariableWorld)
             ResolveTradeTalks();
         else if (Day == _dealDate)
@@ -401,21 +426,25 @@ public sealed partial class Campaign
         TickAgenda();
         if (Day == FloorDay)
         {
-            var house = WhipCount(false).Count(vote => vote.Yes);
-            var senate = WhipCount(true).Count(vote => vote.Yes);
+            var houseVotes = CaptureRollCall(senate: false);
+            var senateVotes = CaptureRollCall(senate: true);
+            _floorRollCall = (houseVotes, senateVotes);
+            int house = houseVotes.Count(vote => vote.Yes);
+            int senate = senateVotes.Count(vote => vote.Yes);
             LastFloorVote = new FloorVote(house, senate, SenateTarget);
             OnDesk = house >= 218 && senate >= SenateTarget && (_measures.Contains(Measure.WorkerRelief) || _measures.Contains(Measure.ProductionCredits) || _measures.Contains(Measure.DomesticSourcing));
             _billResolved = true;
-            if (!OnDesk)
+            if (OnDesk)
+            {
+                string nextStep = Finished ? "It was left unsigned at the handover." : "It awaits your decision.";
+                AddBrief($"The bill passed {house}–{435 - house} in the House and {senate}–{100 - senate} in the Senate. {nextStep}", true);
+            }
+            else
             {
                 Losses++;
                 Approval -= .8;
                 Capital = Math.Max(0, Capital - 3);
-            }
-            AddBrief(OnDesk ? $"The bill passed {house}–{435 - house} in the House and {senate}–{100 - senate} in the Senate. It awaits your decision."
-                : $"The package stalled. House support was {house}/218 and Senate support was {senate}/{SenateTarget}.", true);
-            if (!OnDesk)
-            {
+                AddBrief($"The package stalled. House support was {house}/218 and Senate support was {senate}/{SenateTarget}.", true);
                 ResolveOpeningCommitment(false);
                 RecordOpeningBillOutcome(OpeningBillOutcome.Stalled);
             }
@@ -452,7 +481,7 @@ public sealed partial class Campaign
         }
         if (Date == CurrentElectionDay)
         {
-            Results = States.Select(state => ElectionResult(state, (_random.NextDouble() - .5) * 3.4)).ToArray();
+            Results = States.Select(state => ElectionResult(state, (_random.NextDouble() - .5) * (2 * ElectionDaySwing))).ToArray();
             AddBrief(Term == 1 ? "Polls have closed. Follow the state calls and the race to 270 at the Decision Desk."
                 : "Polls have closed in the race to succeed you. Follow the results at the Decision Desk.", true);
             AddStory("Election night in Michigan", ElectionNightScene, requiresElectionCall: true);

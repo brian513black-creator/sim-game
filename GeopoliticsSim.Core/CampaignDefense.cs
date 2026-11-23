@@ -21,14 +21,33 @@ public sealed partial class Campaign
     private int _missionEnds;
     private int _authorizationVoteDay;
     private int _warPowersReportDay;
+    private int _defenseWindowId;
+    private int _missionWindowId;
+    private int _authorizationWindowId;
+    private string _authorizationTitle = "";
+    private readonly Dictionary<int, DefenseRollCall> _authorizationRollCalls = [];
+    private DefenseAuthorization _authorization;
+    private DefenseRollCall? _lastDefenseVote;
+    private bool _defenseScopeUpgradeScheduled;
     private bool _civilianMissionOrdered;
     private bool _presenceOrdered;
 
     public DefenseMission Mission { get; private set; }
-    public DefenseAuthorization Authorization { get; private set; }
-    public DefenseRollCall? DefenseVote { get; private set; }
+    public bool ScopedDefenseAuthorization { get; private set; }
+    public bool DefenseScopeUpgradeConfigured => ScopedDefenseAuthorization || _defenseScopeUpgradeScheduled;
+    private int AuthorizationScope => Mission == DefenseMission.ProtectivePresence ? _missionWindowId : _defenseWindowId;
+    public DefenseRollCall? DefenseVote => ScopedDefenseAuthorization
+        ? _authorizationRollCalls.GetValueOrDefault(AuthorizationScope) : _lastDefenseVote;
+    public DefenseAuthorization Authorization => !ScopedDefenseAuthorization ? _authorization
+        : _authorization == DefenseAuthorization.Pending && _authorizationWindowId == AuthorizationScope ? DefenseAuthorization.Pending
+        : DefenseVote is { } vote ? (vote.Approved ? DefenseAuthorization.Approved : DefenseAuthorization.Denied)
+        : DefenseAuthorization.None;
     public int Readiness { get; private set; } = 86;
     public string DefenseContext => Mission != DefenseMission.None ? _missionTitle : _defenseWindowTitle;
+    public string DefenseWindowTitle => _defenseWindowTitle;
+    public string DefenseAuthorizationContext => Mission == DefenseMission.ProtectivePresence ? _missionTitle : _defenseWindowTitle;
+    public string? OtherPendingAuthorization => ScopedDefenseAuthorization && _authorization == DefenseAuthorization.Pending
+        && _authorizationWindowId != AuthorizationScope ? _authorizationTitle : null;
     public bool DefenseWindowOpen => !Finished && Day < _defenseWindowEnds;
     public DateTime? AuthorizationVoteDate => Authorization == DefenseAuthorization.Pending
         ? Inauguration.AddDays(_authorizationVoteDay) : null;
@@ -40,7 +59,7 @@ public sealed partial class Campaign
     public bool CanOrderProtectivePresence => DefenseWindowOpen && Mission == DefenseMission.None
         && !_presenceOrdered && Readiness >= 55 && Capital >= PresenceCost;
     public bool CanRequestAuthorization => !Finished && (DefenseWindowOpen || Mission == DefenseMission.ProtectivePresence)
-        && Authorization == DefenseAuthorization.None && Capital >= AuthorizationCost;
+        && _authorization != DefenseAuthorization.Pending && Authorization == DefenseAuthorization.None && Capital >= AuthorizationCost;
     public bool CanWithdraw => !Finished && Mission is DefenseMission.CivilianSupport or DefenseMission.ProtectivePresence;
 
     public string JointChiefsAssessment => Readiness switch
@@ -50,16 +69,34 @@ public sealed partial class Campaign
         _ => "The Joint Chiefs advise against new commitments. Units need time to recover before a protective presence is available."
     };
 
+    public bool ScheduleDefenseScopeUpgrade()
+    {
+        if (DefenseScopeUpgradeConfigured) return false;
+        _defenseScopeUpgradeScheduled = true;
+        UpgradeDefenseScopeIfIdle();
+        return true;
+    }
+
+    private void UpgradeDefenseScopeIfIdle()
+    {
+        // A resumed legacy commitment can finish under the rules used to replay it.
+        if (!_defenseScopeUpgradeScheduled || Mission != DefenseMission.None || _authorization == DefenseAuthorization.Pending)
+            return;
+        ScopedDefenseAuthorization = true;
+        _defenseScopeUpgradeScheduled = false;
+    }
+
     private void OpenDefenseWindow(string title)
     {
+        _defenseWindowId++;
         _defenseWindowTitle = title;
         _defenseWindowEnds = Day + 48;
         _civilianMissionOrdered = false;
         _presenceOrdered = false;
-        if (Mission == DefenseMission.None && Authorization != DefenseAuthorization.Pending)
+        if (Mission == DefenseMission.None && _authorization != DefenseAuthorization.Pending)
         {
-            Authorization = DefenseAuthorization.None;
-            DefenseVote = null;
+            _authorization = DefenseAuthorization.None;
+            _lastDefenseVote = null;
         }
     }
 
@@ -82,6 +119,7 @@ public sealed partial class Campaign
         _presenceOrdered = true;
         Mission = DefenseMission.ProtectivePresence;
         _missionTitle = _defenseWindowTitle;
+        _missionWindowId = _defenseWindowId;
         _missionDay = Day;
         _warPowersReportDay = Day + 2;
         _missionEnds = Day + (Authorization == DefenseAuthorization.Approved ? 100 : 60);
@@ -95,7 +133,9 @@ public sealed partial class Campaign
     public bool RequestDefenseAuthorization()
     {
         if (!CanRequestAuthorization || !Spend(AuthorizationCost)) return false;
-        Authorization = DefenseAuthorization.Pending;
+        _authorization = DefenseAuthorization.Pending;
+        _authorizationWindowId = AuthorizationScope;
+        _authorizationTitle = DefenseAuthorizationContext;
         _authorizationVoteDay = Day + 15;
         AddBrief("You requested a limited authorization for the protective presence. Leadership will bring it to the House and Senate in 15 days.");
         return true;
@@ -120,9 +160,10 @@ public sealed partial class Campaign
     {
         if (Day == _warPowersReportDay)
             AddBrief("The White House transmitted its War Powers report to Congress within 48 hours.");
-        if (Authorization == DefenseAuthorization.Pending && Day == _authorizationVoteDay)
+        if (_authorization == DefenseAuthorization.Pending && Day == _authorizationVoteDay)
             ResolveDefenseAuthorization();
 
+        UpgradeDefenseScopeIfIdle();
         if (Mission == DefenseMission.None)
         {
             if (Day % 7 == 0) Readiness = Math.Min(100, Readiness + 1);
@@ -162,6 +203,7 @@ public sealed partial class Campaign
                 AddBrief("The Pentagon reports that withdrawal is complete. Readiness will recover as the commitment winds down.", true);
                 break;
         }
+        UpgradeDefenseScopeIfIdle();
     }
 
     private void ResolveDefenseAuthorization()
@@ -169,16 +211,20 @@ public sealed partial class Campaign
         double support = (Approval - 50) * .006 + MidtermShift * .04;
         int house = _seats.Count(seat => !seat.Senator && SupportsDefenseAuthorization(seat, support));
         int senate = _seats.Count(seat => seat.Senator && SupportsDefenseAuthorization(seat, support));
-        DefenseVote = new DefenseRollCall(house, senate);
-        Authorization = DefenseVote.Approved ? DefenseAuthorization.Approved : DefenseAuthorization.Denied;
-        if (Authorization == DefenseAuthorization.Approved && Mission == DefenseMission.ProtectivePresence)
+        var vote = new DefenseRollCall(house, senate);
+        _lastDefenseVote = vote;
+        _authorizationRollCalls[_authorizationWindowId] = vote;
+        _authorization = vote.Approved ? DefenseAuthorization.Approved : DefenseAuthorization.Denied;
+        if (vote.Approved && Mission == DefenseMission.ProtectivePresence
+            && (!ScopedDefenseAuthorization || _missionWindowId == _authorizationWindowId))
             _missionEnds = _missionDay + 100;
 
-        AddBrief($"The limited authorization drew {house} House votes and {senate} Senate votes. "
-            + (Authorization == DefenseAuthorization.Approved
+        string measure = ScopedDefenseAuthorization ? $"The limited authorization for {_authorizationTitle}" : "The limited authorization";
+        AddBrief($"{measure} drew {house} House votes and {senate} Senate votes. "
+            + (vote.Approved
                 ? "Congress approved the commitment."
-                : "The measure fell short. The War Powers deadline still applies to any protective presence."), true);
-        AddStory("The authorization vote", Authorization == DefenseAuthorization.Approved
+                : "The measure fell short. The War Powers deadline still applies to this commitment."), true);
+        AddStory("The authorization vote", vote.Approved
             ? "Mercer sends the signed resolution with the review date marked. The members who voted for it want a fresh readiness report before another commitment comes up."
             : "Mercer brings the roll calls. Several members who voted against the authorization ask when State can appear before the committee to discuss what happens next.");
     }
