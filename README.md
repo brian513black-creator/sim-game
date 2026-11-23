@@ -43,6 +43,8 @@ The pure C# rules live in `GeopoliticsSim.Core`. Godot dispatches day batches to
 
 ## Release checks
 
+GitHub Actions builds and tests the game on Windows. Download `The-Mandate-Windows-x64` from the Artifacts section of a successful [Windows build run](https://github.com/brian513black-creator/sim-game/actions/workflows/windows-build.yml).
+
 Run the campaign simulation smoke test and the menu checks before exporting. The menu check uses a fresh user-data directory so it cannot touch an existing campaign.
 
 ```sh

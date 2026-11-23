@@ -1,0 +1,121 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and package Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      GODOT_VERSION: 4.5.1
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build and test the simulation
+        run: |
+          dotnet build GeopoliticsSim.sln
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet run --project tests/CampaignSmoke.csproj
+
+      - name: Install Godot .NET and the Windows templates
+        run: |
+          $release = "${env:GODOT_VERSION}-stable"
+          $base = "https://github.com/godotengine/godot-builds/releases/download/$release"
+          $editorName = "Godot_v${release}_mono_win64.zip"
+          $templatesName = "Godot_v${release}_mono_export_templates.tpz"
+          $editorArchive = Join-Path $env:RUNNER_TEMP $editorName
+          $templatesArchive = Join-Path $env:RUNNER_TEMP $templatesName
+
+          curl.exe --fail --location --retry 3 "$base/$editorName" --output $editorArchive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-FileHash $editorArchive -Algorithm SHA256).Hash -ne '8ce2346c05c8a9674ab267b4a0a7e2764a6e47da730713aa932c2a6db774a239') {
+            throw 'The Godot editor archive failed its SHA-256 check.'
+          }
+          $editorDirectory = Join-Path $env:RUNNER_TEMP 'godot-editor'
+          Expand-Archive -LiteralPath $editorArchive -DestinationPath $editorDirectory
+          $godot = Get-ChildItem $editorDirectory -File -Recurse -Filter '*_console.exe' | Select-Object -First 1
+          if (!$godot) { throw 'The Godot console executable is missing.' }
+          "GODOT=$($godot.FullName)" >> $env:GITHUB_ENV
+
+          curl.exe --fail --location --retry 3 "$base/$templatesName" --output $templatesArchive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-FileHash $templatesArchive -Algorithm SHA256).Hash -ne 'c425633061bb49f4390bdcece2b9ce68b3b0be3c71095b40644d8f6f17b1146e') {
+            throw 'The Godot template archive failed its SHA-256 check.'
+          }
+          $templateDirectory = Join-Path $env:APPDATA "Godot/export_templates/${env:GODOT_VERSION}.stable.mono"
+          New-Item -ItemType Directory -Force -Path $templateDirectory | Out-Null
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($templatesArchive)
+          try {
+            foreach ($file in @('windows_debug_x86_64.exe', 'windows_release_x86_64.exe')) {
+              $entry = $archive.GetEntry("templates/$file")
+              if (!$entry) { throw "Missing Godot template $file." }
+              [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $templateDirectory $file), $true)
+            }
+          } finally {
+            $archive.Dispose()
+          }
+
+      - name: Import assets and test the game UI
+        run: |
+          & $env:GODOT --headless --path . --editor --import
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          foreach ($test in @('menu_smoke', 'election_resume_smoke')) {
+            $env:APPDATA = Join-Path $env:RUNNER_TEMP $test
+            New-Item -ItemType Directory -Force -Path $env:APPDATA | Out-Null
+            & $env:GODOT --headless --path . --script "tests/$test.gd"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Export the Windows build
+        run: |
+          New-Item -ItemType Directory -Force -Path 'exports/windows' | Out-Null
+          & $env:GODOT --headless --path . --export-release 'Windows Desktop' 'exports/windows/The Mandate.exe'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (!(Test-Path -LiteralPath 'exports/windows/The Mandate.exe' -PathType Leaf)) {
+            throw 'The Windows executable was not exported.'
+          }
+          if (!(Get-ChildItem 'exports/windows' -File -Recurse -Filter 'GeopoliticsSim.Core.dll')) {
+            throw 'The export is missing the simulation library.'
+          }
+
+      - name: Smoke test the exported Windows game
+        run: |
+          $env:APPDATA = Join-Path $env:RUNNER_TEMP 'exported-menu-smoke'
+          New-Item -ItemType Directory -Force -Path $env:APPDATA | Out-Null
+          $export = (Resolve-Path 'exports/windows').Path
+          $script = (Resolve-Path 'tests/menu_smoke.gd').Path
+          $stdout = Join-Path $env:RUNNER_TEMP 'exported-menu.stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'exported-menu.stderr.log'
+          $game = Start-Process -FilePath (Join-Path $export 'The Mandate.exe') -PassThru `
+            -ArgumentList "--headless --path `"$export`" --script `"$script`"" `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          if (!$game.WaitForExit(90000)) {
+            Stop-Process -Id $game.Id -Force
+            throw 'The exported game did not finish its menu smoke test.'
+          }
+          Get-Content -LiteralPath $stdout, $stderr
+          if ($game.ExitCode -ne 0) { exit $game.ExitCode }
+
+      - name: Upload the playable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: The-Mandate-Windows-x64
+          path: exports/windows/
+          if-no-files-found: error
